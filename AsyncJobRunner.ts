@@ -1,10 +1,15 @@
-class AsyncJobRunner<TJob extends { id: string; companyId: string; retry: number; type: string }, TJobInput> {
+import { PoolClient } from 'pg';
+
+export default class AsyncJobRunner<
+  TJob extends { id: string; companyId: string; retry: number; type: string },
+  TJobInput
+> {
   currentJob: null | TJob = null;
   timeout: NodeJS.Timeout | null = null;
-  tickRate: number = 5000;
+  tickRate = 5000;
 
   queryJob: () => Promise<TJob | null>;
-  insertJob: (data: TJobInput) => Promise<TJob>;
+  insertJob: (data: TJobInput, client?: PoolClient) => Promise<TJob>;
   processJob: (data: TJob) => Promise<boolean>;
   onJobFailed: (data: TJob, error: Error) => Promise<any>;
   onJobCompleted: (data: TJob, completed: boolean) => Promise<any>;
@@ -36,21 +41,12 @@ class AsyncJobRunner<TJob extends { id: string; companyId: string; retry: number
 
   idle = () => {
     this.log('idle');
-
-    if (this.timeout) {
-      clearTimeout(this.timeout);
-      this.timeout = null;
-    }
-  };
-
-  tick = () => {
-    if (this.timeout) return;
-
-    this.log('tick');
     this.timeout = setTimeout(this.getJob, this.tickRate);
   };
 
   getJob = async () => {
+    if (this.currentJob) return;
+
     this.log('getJob');
     this.currentJob = await this.queryJob();
 
@@ -74,14 +70,13 @@ class AsyncJobRunner<TJob extends { id: string; companyId: string; retry: number
       this.log('failed');
     } finally {
       this.currentJob = null;
-      this.timeout = null;
-      this.tick();
+      this.getJob();
     }
   };
 
-  createJob = async (data: TJobInput) => {
-    const job = this.insertJob(data);
-    this.tick();
+  createJob = async (data: TJobInput, client?: PoolClient) => {
+    const job = await this.insertJob(data, client);
+    this.getJob();
     return job;
   };
 }
