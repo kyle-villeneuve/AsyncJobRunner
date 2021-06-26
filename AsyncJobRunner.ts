@@ -7,6 +7,7 @@ export default class AsyncJobRunner<
   currentJob: null | TJob = null;
   timeout: NodeJS.Timeout | null = null;
   tickRate = 5000;
+  halted = false;
 
   queryJob: () => Promise<TJob | null>;
   insertJob: (data: TJobInput, client?: PoolClient) => Promise<TJob>;
@@ -39,42 +40,83 @@ export default class AsyncJobRunner<
     }
   }
 
+  halt = () => {
+    this.log('halt()');
+    this.halted = true;
+    return this.halted;
+  };
+
+  resume = () => {
+    this.log('resume()');
+    if (this.halted){
+      this.getJob();
+    }
+    this.halted = false;
+    return this.halted;
+  }
+
   idle = () => {
-    this.log('idle');
+    this.log('idle()');
     this.timeout = setTimeout(this.getJob, this.tickRate);
   };
 
-  getJob = async () => {
-    if (this.currentJob) return;
+  purge = () => {
+    this.log('purge()');
+    if (this.timeout) {
+      clearTimeout(this.timeout);
+      this.timeout = null;
+    }
+    if (this.currentJob) {
+      this.currentJob = null;
+    }
+  };
 
-    this.log('getJob');
+  getJob = async () => {
+    if (this.halted) return;
+    this.log('getJob()');
+
+    if (this.currentJob) {
+      this.log('getJob: job exists');
+      return;
+    }
+
     this.currentJob = await this.queryJob();
 
     if (!this.currentJob) {
       this.idle();
     } else {
-      this.runJob();
+      await this.runJob();
     }
   };
 
   runJob = async () => {
-    if (!this.currentJob) return null;
-    this.log('started');
+    this.log('runJob()');
+    if (!this.currentJob) {
+      return null;
+    }
+
+    let succeeded = false;
 
     try {
-      const completed = await this.processJob(this.currentJob);
-      this.log(completed ? 'completed' : 'not completed');
-      await this.onJobCompleted(this.currentJob, completed);
+      succeeded = await this.processJob(this.currentJob);
+      this.log(succeeded ? 'completed' : 'not completed');
+      await this.onJobCompleted(this.currentJob, succeeded);
     } catch (error) {
+      this.log(`runJob: job failed ${JSON.stringify({ error })}`);
       await this.onJobFailed(this.currentJob, error);
-      this.log('failed');
     } finally {
-      this.currentJob = null;
-      this.getJob();
+      this.purge();
+
+      if (succeeded) {
+        await this.getJob();
+      } else {
+        this.idle();
+      }
     }
   };
 
   createJob = async (data: TJobInput, client?: PoolClient) => {
+    this.log('createJob()');
     const job = await this.insertJob(data, client);
     this.getJob();
     return job;
