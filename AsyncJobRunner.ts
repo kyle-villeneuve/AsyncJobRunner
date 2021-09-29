@@ -4,9 +4,8 @@ export default class AsyncJobRunner<
   TJob extends { id: string; companyId: string; retry: number; type: string },
   TJobInput
 > {
-  currentJob: null | TJob = null;
   timeout: NodeJS.Timeout | null = null;
-  tickRate = 5000;
+  tickRate: number;
   halted = false;
 
   queryJob: () => Promise<TJob | null>;
@@ -23,6 +22,7 @@ export default class AsyncJobRunner<
     onJobCompleted: (data: TJob, completed: boolean) => Promise<any>;
     onJobFailed: (data: TJob, error: Error) => Promise<any>;
     logJob?: (message: string) => void;
+    tickRate?: number;
   }) {
     this.queryJob = args.queryJob;
     this.insertJob = args.insertJob;
@@ -30,85 +30,75 @@ export default class AsyncJobRunner<
     this.onJobFailed = args.onJobFailed;
     this.onJobCompleted = args.onJobCompleted;
     this.logJob = args.logJob;
+    this.tickRate = args.tickRate || 5000;
   }
 
-  log(message: string) {
-    if (!this.currentJob) {
-      this.logJob?.(message);
+  log = (message: string, job?: TJob) => {
+    if (!this.logJob) return;
+
+    if (job) {
+      this.logJob(`Job ${job.id}: ${message}`);
     } else {
-      this.logJob?.(`${this.currentJob.id}: ${message}`);
+      this.logJob(message);
     }
-  }
+  };
 
-  halt = () => {
+  halt = (): boolean => {
     this.log('halt()');
     this.halted = true;
     return this.halted;
   };
 
-  resume = () => {
+  resume = (): boolean => {
     this.log('resume()');
-    if (this.halted){
-      this.getJob();
-    }
     this.halted = false;
-    return this.halted;
-  }
-
-  idle = () => {
-    this.log('idle()');
-    this.timeout = setTimeout(this.getJob, this.tickRate);
+    this.getJob();
+    return !this.halted;
   };
 
-  purge = () => {
-    this.log('purge()');
-    if (this.timeout) {
-      clearTimeout(this.timeout);
+  idle = (): void => {
+    this.log('idle()');
+    this.timeout = setTimeout(() => {
       this.timeout = null;
-    }
-    if (this.currentJob) {
-      this.currentJob = null;
-    }
+      this.getJob();
+    }, this.tickRate);
   };
 
   getJob = async () => {
-    if (this.halted) return;
-    this.log('getJob()');
-
-    if (this.currentJob) {
-      this.log('getJob: job exists');
+    if (this.timeout) {
       return;
     }
 
-    this.currentJob = await this.queryJob();
+    if (this.halted) {
+      this.log('getJob: halted');
+      return;
+    }
 
-    if (!this.currentJob) {
+    this.log('getJob()');
+
+    const job = await this.queryJob();
+
+    if (!job) {
       this.idle();
     } else {
-      await this.runJob();
+      this.runJob(job);
     }
   };
 
-  runJob = async () => {
-    this.log('runJob()');
-    if (!this.currentJob) {
-      return null;
-    }
-
-    let succeeded = false;
+  runJob = async (job: TJob) => {
+    this.log('runJob()', job);
+    let succeeded: boolean = false;
 
     try {
-      succeeded = await this.processJob(this.currentJob);
-      this.log(succeeded ? 'completed' : 'not completed');
-      await this.onJobCompleted(this.currentJob, succeeded);
+      succeeded = await this.processJob(job);
+      this.log(succeeded ? 'completed' : 'not completed', job);
+      await this.onJobCompleted(job, succeeded);
     } catch (error) {
-      this.log(`runJob: job failed ${JSON.stringify({ error })}`);
-      await this.onJobFailed(this.currentJob, error);
+      this.log(`runJob: job failed ${JSON.stringify({ error })}`, job);
+      await this.onJobFailed(job, error);
     } finally {
-      this.purge();
-
       if (succeeded) {
-        await this.getJob();
+        this.getJob();
       } else {
         this.idle();
       }
